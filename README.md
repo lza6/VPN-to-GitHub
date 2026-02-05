@@ -34,36 +34,7 @@
 - 下载 Windows 版本
 - 安装时勾选 "Add Python to PATH"
 
-#### 2. 安装 Git
-
-下载并安装 Git：
-- 访问 https://git-scm.com/download/win
-- 下载 Windows 版本
-- 安装时使用默认选项
-
-#### 3. 安装 GitHub CLI
-
-下载并安装 GitHub CLI：
-- 访问 https://cli.github.com/
-- 下载 Windows 版本
-- 安装后打开命令行，输入 `gh --version` 验证安装
-
-#### 4. 安装项目依赖
-
-打开项目目录，运行以下命令：
-
-```bash
-cd C:\Users\Administrator.DESKTOP-EGNE9ND\Desktop\自动上传到GitHub
-pip install -r requirements.txt
-```
-
-#### 5. 启动程序
-
-双击 `start.bat` 文件启动程序，或在命令行中运行：
-
-```bash
-python main.py
-```
+# 小白直接启动仓库的stear.bat脚本即可自动创建虚拟环境自动安装依赖
 
 ## 📖 使用教程（小白必读）
 
