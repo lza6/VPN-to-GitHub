@@ -1,0 +1,10 @@
+PyQt6>=6.4.0
+PyQt6-Qt6>=6.4.0
+GitPython>=3.1.30
+schedule>=1.1.0
+watchdog>=2.2.0
+pywin32>=305; platform_system=="Windows"
+
+# GitHub认证和HTTP客户端
+keyring>=24.3.0
+httpx>=0.26.0
