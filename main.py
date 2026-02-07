@@ -3,6 +3,8 @@ import os
 
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
+# 抑制 libpng 的 ICC 警告
+os.environ['QT_IMAGEIO_DISABLE_WARNING'] = '1'
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt

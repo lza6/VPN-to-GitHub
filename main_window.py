@@ -231,8 +231,44 @@ class MainWindow(QMainWindow):
         self.config_manager.save()
     
     def closeEvent(self, event):
-        self._save_window_geometry()
+        self._cleanup()
         super().closeEvent(event)
+
+    def _cleanup(self):
+        """清理资源，防止内存泄漏"""
+        # 停止所有定时器
+        if hasattr(self, 'status_timer'):
+            self.status_timer.stop()
+        if hasattr(self, '_resize_timer'):
+            self._resize_timer.stop()
+        if hasattr(self, '_move_timer'):
+            self._move_timer.stop()
+
+        # 停止并清理所有 Worker
+        if self.upload_worker and self.upload_worker.isRunning():
+            self.upload_worker.terminate()
+            self.upload_worker.wait(2000)  # 等待最多 2 秒
+        if self.init_worker and self.init_worker.isRunning():
+            self.init_worker.terminate()
+            self.init_worker.wait(2000)
+        if self.auth_worker and self.auth_worker.isRunning():
+            self.auth_worker.terminate()
+            self.auth_worker.wait(2000)
+
+        # 停止文件监控
+        if self.file_watcher:
+            self.file_watcher.stop()
+
+        # 停止调度器
+        if self.scheduler:
+            self.scheduler.stop()
+
+        # 清理系统托盘图标
+        if self.tray_icon:
+            self.tray_icon.hide()
+
+        # 保存窗口几何信息
+        self._save_window_geometry()
     
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -892,10 +928,23 @@ class MainWindow(QMainWindow):
         #     self._start_monitoring()
     
     def _start_auth(self):
+        # 清理旧的 Worker，避免重复连接
+        if self.auth_worker:
+            try:
+                self.auth_worker.progress.disconnect(self._log)
+                self.auth_worker.finished_signal.disconnect(self._on_auth_finished)
+            except Exception:
+                pass
+            if self.auth_worker.isRunning():
+                self.auth_worker.terminate()
+                self.auth_worker.wait(2000)
+            self.auth_worker.deleteLater()
+            self.auth_worker = None
+
         self.auth_btn.setEnabled(False)
         self._log("开始GitHub授权流程...")
         self._log("正在检查GitHub CLI登录状态...")
-        
+
         self.auth_worker = AuthWorker(self.github_auth)
         self.auth_worker.progress.connect(self._log)
         self.auth_worker.finished_signal.connect(self._on_auth_finished)
@@ -904,7 +953,14 @@ class MainWindow(QMainWindow):
     def _on_auth_finished(self, result):
         from github_auth import AuthResult
         self.auth_btn.setEnabled(True)
-        
+
+        # 清理 Worker 对象，避免内存泄漏
+        if self.auth_worker:
+            self.auth_worker.finished_signal.disconnect(self._on_auth_finished)
+            self.auth_worker.progress.disconnect(self._log)
+            self.auth_worker.deleteLater()
+            self.auth_worker = None
+
         if isinstance(result, AuthResult) and result.success:
             username = result.credential.username if result.credential else ""
             self.auth_status_label.setText(f"状态: 已登录 ({username})")
@@ -919,7 +975,7 @@ class MainWindow(QMainWindow):
         else:
             error_msg = result.error if isinstance(result, AuthResult) else str(result)
             self._log(f"授权失败: {error_msg}")
-            
+
             # 如果是登录超时或未完成，提供更友好的提示
             if "超时" in error_msg or "未完成" in error_msg:
                 msg_box = QMessageBox(self)
@@ -927,12 +983,12 @@ class MainWindow(QMainWindow):
                 msg_box.setText("浏览器已打开，请在浏览器中完成GitHub授权")
                 msg_box.setInformativeText("授权完成后，请点击下方按钮重新检测")
                 msg_box.setIcon(QMessageBox.Icon.Information)
-                
+
                 retry_btn = msg_box.addButton("重新检测", QMessageBox.ButtonRole.ActionRole)
                 cancel_btn = msg_box.addButton(QMessageBox.StandardButton.Cancel)
-                
+
                 msg_box.exec()
-                
+
                 if msg_box.clickedButton() == retry_btn:
                     self._start_auth()
             else:
@@ -1147,29 +1203,42 @@ curl -I https://github.com
         if not self.github_auth.is_authenticated():
             self._log("未登录，无法获取仓库列表")
             return
-        
+
+        # 防止重复加载
+        if hasattr(self, '_loading_repos') and self._loading_repos:
+            self._log("正在加载仓库列表，请稍候...")
+            return
+
+        self._loading_repos = True
+
         self._log("正在获取仓库列表...")
         print("开始获取仓库列表...")
-        self._repos = self.github_auth.get_repositories()
-        print(f"获取到 {len(self._repos)} 个仓库")
-        
-        self.repo_combo.clear()
-        self.repo_combo.addItem("请选择仓库...", "")
-        
-        for repo in self._repos:
-            # 使用 [P] 替代 emoji 避免Windows上的字体渲染问题导致的崩溃
-            display_text = f"[P] {repo['full_name']}" if repo['private'] else repo['full_name']
-            self.repo_combo.addItem(display_text, repo['full_name'])
-        
-        self.repo_combo.setEnabled(True)
-        self.refresh_repos_btn.setEnabled(True)
-        self._log(f"已加载 {len(self._repos)} 个仓库")
-        
-        config = self.config_manager.config
-        if config.repo_full_name:
-            index = self.repo_combo.findData(config.repo_full_name)
-            if index >= 0:
-                self.repo_combo.setCurrentIndex(index)
+
+        try:
+            self._repos = self.github_auth.get_repositories()
+            print(f"获取到 {len(self._repos)} 个仓库")
+
+            self.repo_combo.clear()
+            self.repo_combo.addItem("请选择仓库...", "")
+
+            for repo in self._repos:
+                # 使用 [P] 替代 emoji 避免Windows上的字体渲染问题导致的崩溃
+                display_text = f"[P] {repo['full_name']}" if repo['private'] else repo['full_name']
+                self.repo_combo.addItem(display_text, repo['full_name'])
+
+            self.repo_combo.setEnabled(True)
+            self.refresh_repos_btn.setEnabled(True)
+            self._log(f"已加载 {len(self._repos)} 个仓库")
+
+            config = self.config_manager.config
+            if config.repo_full_name:
+                index = self.repo_combo.findData(config.repo_full_name)
+                if index >= 0:
+                    self.repo_combo.setCurrentIndex(index)
+        except Exception as e:
+            self._log(f"加载仓库列表失败: {str(e)}")
+        finally:
+            self._loading_repos = False
     
     def _on_repo_selected(self, index):
         if index <= 0:
@@ -1297,6 +1366,14 @@ curl -I https://github.com
     
     def _on_init_finished(self, success: bool, message: str):
         self.init_btn.setEnabled(True)
+
+        # 清理 Worker 对象，避免内存泄漏
+        if self.init_worker:
+            self.init_worker.finished_signal.disconnect(self._on_init_finished)
+            self.init_worker.progress.disconnect(self._log)
+            self.init_worker.deleteLater()
+            self.init_worker = None
+
         if success:
             self._log(f"仓库初始化成功: {message}")
             QMessageBox.information(self, "成功", message)
@@ -1345,50 +1422,79 @@ curl -I https://github.com
         self.upload_worker.start()
     
     def _on_upload_finished(self, success: bool, message: str):
-        
-        config = self.config_manager.config
-        config.total_upload_count += 1
-        
-        if success:
-            self._log(f"上传成功: {message}")
-            config.success_upload_count += 1
-            self.config_manager.update_last_upload_time()
-            
+
+        # 清理 Worker 对象，避免内存泄漏
+        if self.upload_worker:
+            # 先获取 new_hashes（如果存在）
+            new_hashes = None
             if hasattr(self.upload_worker, 'new_hashes'):
-                for filename, file_hash in self.upload_worker.new_hashes.items():
-                    self.config_manager.set_file_hash(filename, file_hash)
-            
-            # 调度器会自动在下一次上传完成后设置下次上传时间
-            if self.scheduler.is_running():
-                next_time = self.scheduler.get_next_run_time()
-                if next_time:
-                    self._log(f"下次上传时间: {next_time.strftime('%Y年%m月%d日 %H:%M:%S')}")
-            
-            if self.tray_icon:
-                self.tray_icon.showMessage(
-                    "上传成功",
-                    f"文件已成功上传到GitHub\n{message}",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    3000
-                )
+                new_hashes = self.upload_worker.new_hashes
+
+            # 断开信号连接
+            self.upload_worker.finished_signal.disconnect(self._on_upload_finished)
+            self.upload_worker.progress.disconnect(self._log)
+            self.upload_worker.deleteLater()
+            self.upload_worker = None
+
+            config = self.config_manager.config
+            config.total_upload_count += 1
+
+            if success:
+                self._log(f"上传成功: {message}")
+                config.success_upload_count += 1
+                self.config_manager.update_last_upload_time()
+
+                # 使用保存的 new_hashes
+                if new_hashes:
+                    for filename, file_hash in new_hashes.items():
+                        self.config_manager.set_file_hash(filename, file_hash)
+
+                # 调度器会自动在下一次上传完成后设置下次上传时间
+                if self.scheduler.is_running():
+                    next_time = self.scheduler.get_next_run_time()
+                    if next_time:
+                        self._log(f"下次上传时间: {next_time.strftime('%Y年%m月%d日 %H:%M:%S')}")
+
+                if self.tray_icon:
+                    self.tray_icon.showMessage(
+                        "上传成功",
+                        f"文件已成功上传到GitHub\n{message}",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        3000
+                    )
+            else:
+                self._log(f"上传失败: {message}")
+                config.failed_upload_count += 1
+
+                # 上传失败，调度器仍然会按照预定时间尝试下一次上传
+                if self.scheduler.is_running():
+                    self._log("上传失败，将按预定时间重试")
+
+                if self.tray_icon:
+                    self.tray_icon.showMessage(
+                        "上传失败",
+                        message,
+                        QSystemTrayIcon.MessageIcon.Warning,
+                        3000
+                    )
+
+            self.config_manager.save()
+            self._update_stats_display()
         else:
-            self._log(f"上传失败: {message}")
-            config.failed_upload_count += 1
-            
-            # 上传失败，调度器仍然会按照预定时间尝试下一次上传
-            if self.scheduler.is_running():
-                self._log("上传失败，将按预定时间重试")
-            
-            if self.tray_icon:
-                self.tray_icon.showMessage(
-                    "上传失败",
-                    message,
-                    QSystemTrayIcon.MessageIcon.Warning,
-                    3000
-                )
-        
-        self.config_manager.save()
-        self._update_stats_display()
+            # 如果 upload_worker 已经为 None，只更新配置
+            config = self.config_manager.config
+            config.total_upload_count += 1
+
+            if success:
+                self._log(f"上传成功: {message}")
+                config.success_upload_count += 1
+                self.config_manager.update_last_upload_time()
+            else:
+                self._log(f"上传失败: {message}")
+                config.failed_upload_count += 1
+
+            self.config_manager.save()
+            self._update_stats_display()
     
     def _update_stats_display(self):
         config = self.config_manager.config

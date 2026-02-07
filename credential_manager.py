@@ -26,24 +26,26 @@ class CredentialManager:
     macOS: Keychain
     Linux: Secret Service / KWallet
     """
-    
+
     SERVICE_NAME = "GitHubAutoUploader"
     TOKEN_KEY = "github_access_token"
     USERNAME_KEY = "github_username"
     USER_ID_KEY = "github_user_id"
     AVATAR_KEY = "github_avatar_url"
     SCOPE_KEY = "github_scope"
-    
+
     def __init__(self):
         print("凭证管理器初始化")
+        self._cached_credential: Optional[GitHubCredential] = None
+        self._cache_valid = False
     
     def save_credential(self, credential: GitHubCredential) -> bool:
         """
         保存GitHub凭证
-        
+
         Args:
             credential: GitHub凭证对象
-            
+
         Returns:
             是否保存成功
         """
@@ -54,7 +56,7 @@ class CredentialManager:
                 self.TOKEN_KEY,
                 credential.access_token
             )
-            
+
             # 存储用户名
             if credential.username:
                 keyring.set_password(
@@ -62,7 +64,7 @@ class CredentialManager:
                     self.USERNAME_KEY,
                     credential.username
                 )
-            
+
             # 存储用户ID
             if credential.user_id is not None:
                 keyring.set_password(
@@ -70,7 +72,7 @@ class CredentialManager:
                     self.USER_ID_KEY,
                     str(credential.user_id)
                 )
-            
+
             # 存储头像URL
             if credential.avatar_url:
                 keyring.set_password(
@@ -78,7 +80,7 @@ class CredentialManager:
                     self.AVATAR_KEY,
                     credential.avatar_url
                 )
-            
+
             # 存储scope
             if credential.scope:
                 keyring.set_password(
@@ -86,37 +88,49 @@ class CredentialManager:
                     self.SCOPE_KEY,
                     credential.scope
                 )
-            
+
+            # 更新缓存
+            self._cached_credential = credential
+            self._cache_valid = True
+
             print(f"凭证已安全存储: {credential.username or 'unknown'}")
             return True
-            
+
         except Exception as e:
             print(f"保存凭证失败: {e}")
             return False
     
-    def load_credential(self) -> Optional[GitHubCredential]:
+    def load_credential(self, use_cache: bool = True) -> Optional[GitHubCredential]:
         """
         加载已保存的GitHub凭证
-        
+
+        Args:
+            use_cache: 是否使用缓存，默认为True
+
         Returns:
             GitHubCredential对象，如果不存在则返回None
         """
+        # 如果缓存有效，直接返回缓存的凭证
+        if use_cache and self._cache_valid and self._cached_credential:
+            return self._cached_credential
+
         try:
             # 获取访问令牌
             access_token = keyring.get_password(self.SERVICE_NAME, self.TOKEN_KEY)
-            
+
             if not access_token:
-                print("未找到已保存的凭证")
+                if not self._cache_valid:
+                    print("未找到已保存的凭证")
                 return None
-            
+
             # 获取其他信息
             username = keyring.get_password(self.SERVICE_NAME, self.USERNAME_KEY)
             user_id_str = keyring.get_password(self.SERVICE_NAME, self.USER_ID_KEY)
             avatar_url = keyring.get_password(self.SERVICE_NAME, self.AVATAR_KEY)
             scope = keyring.get_password(self.SERVICE_NAME, self.SCOPE_KEY) or ""
-            
+
             user_id = int(user_id_str) if user_id_str else None
-            
+
             credential = GitHubCredential(
                 access_token=access_token,
                 username=username,
@@ -124,10 +138,17 @@ class CredentialManager:
                 avatar_url=avatar_url,
                 scope=scope,
             )
-            
-            print(f"已加载凭证: {credential.username or 'unknown'}")
+
+            # 缓存凭证
+            self._cached_credential = credential
+            self._cache_valid = True
+
+            # 只在第一次加载时打印日志
+            if not use_cache:
+                print(f"已加载凭证: {credential.username or 'unknown'}")
+
             return credential
-            
+
         except Exception as e:
             print(f"加载凭证失败: {e}")
             return None
@@ -135,7 +156,7 @@ class CredentialManager:
     def delete_credential(self) -> bool:
         """
         删除保存的GitHub凭证
-        
+
         Returns:
             是否删除成功
         """
@@ -147,17 +168,21 @@ class CredentialManager:
                 self.AVATAR_KEY,
                 self.SCOPE_KEY,
             ]
-            
+
             for key in keys:
                 try:
                     keyring.delete_password(self.SERVICE_NAME, key)
                 except keyring.errors.PasswordDeleteError:
                     # 密码不存在，忽略
                     pass
-            
+
+            # 清除缓存
+            self._cached_credential = None
+            self._cache_valid = False
+
             print("凭证已删除")
             return True
-            
+
         except Exception as e:
             print(f"删除凭证失败: {e}")
             return False

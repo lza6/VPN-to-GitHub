@@ -25,15 +25,15 @@ class GitHubAuth:
     GitHub OAuth认证管理器
     使用GitHub CLI进行认证
     """
-    
+
     def __init__(self):
         self._on_auth_complete: Optional[Callable[[AuthResult], None]] = None
-        
+
         # 检测代理设置
         import os
         http_proxy = os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
         https_proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy')
-        
+
         # 清理代理地址（移除空字符串和无效地址）
         def clean_proxy(proxy_str):
             if not proxy_str:
@@ -42,27 +42,25 @@ class GitHubAuth:
             if not proxy_str or proxy_str == "http://" or proxy_str == "https://":
                 return None
             return proxy_str
-        
+
         http_proxy = clean_proxy(http_proxy)
         https_proxy = clean_proxy(https_proxy)
-        
-        # HTTP客户端（自动使用代理）
-        proxy = https_proxy or http_proxy
-        if proxy:
-            print(f"已配置代理: {proxy}")
-        
-        self._client = Client(
+
+        # 保存代理配置
+        self._proxy = https_proxy or http_proxy
+        if self._proxy:
+            print(f"已配置代理: {self._proxy}")
+
+    def _get_client(self):
+        """创建新的 httpx.Client 实例（线程安全）"""
+        return Client(
             timeout=30.0,
             headers={
                 "Accept": "application/vnd.github.v3+json",
                 "User-Agent": "GitHub-Auto-Uploader"
             },
-            proxy=proxy if proxy else None
+            proxy=self._proxy if self._proxy else None
         )
-    
-    def __del__(self):
-        if hasattr(self, '_client'):
-            self._client.close()
     
     def is_authenticated(self) -> bool:
         """检查是否已认证"""
@@ -152,139 +150,159 @@ class GitHubAuth:
         status_callback: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """自动使用web方式登录GitHub CLI"""
-        import webbrowser
-        import threading
-        
-        def login_worker():
-            """在后台线程中执行登录流程"""
-            try:
-                # 先进行网络诊断
+        process = None  # 初始化进程变量，用于异常处理时清理
+
+        try:
+            # 先进行网络诊断
+            if status_callback:
+                status_callback("正在诊断网络连接...")
+
+            if not self._check_github_accessibility(status_callback):
+                on_complete(AuthResult(
+                    success=False,
+                    error="无法连接到 GitHub\n\n请检查：\n"
+                          "1. 网络连接是否正常\n"
+                          "2. 是否需要配置代理\n"
+                          "3. 防火墙是否阻止了 GitHub 访问\n\n"
+                          "如果需要配置代理，请在终端中执行：\n"
+                          "set HTTP_PROXY=http://proxy.example.com:port\n"
+                          "set HTTPS_PROXY=http://proxy.example.com:port"
+                ))
+                return True
+
+            # 使用web方式启动GitHub CLI登录
+            # gh auth login --web --hostname github.com 会打开浏览器，用户在浏览器中完成授权
+            cmd = ["gh", "auth", "login", "--web", "--hostname", "github.com", "--git-protocol", "https"]
+
+            if status_callback:
+                status_callback("正在启动GitHub CLI web登录...")
+                print(f"执行命令: {' '.join(cmd)}")
+
+            # 在新进程中启动登录命令
+            encoding = 'gbk' if sys.platform == 'win32' else 'utf-8'
+
+            # Windows下不使用CREATE_NO_WINDOW，让浏览器能正常打开
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding=encoding,
+                errors='ignore',
+            )
+
+            if status_callback:
+                status_callback(f"进程已启动 (PID: {process.pid})")
+
+            # 检查进程是否启动成功
+            if process.poll() is not None:
+                # 进程已经结束
+                stdout, stderr = process.communicate()
+                error_msg = stderr.strip() if stderr else stdout.strip()
                 if status_callback:
-                    status_callback("正在诊断网络连接...")
-                
-                if not self._check_github_accessibility(status_callback):
-                    on_complete(AuthResult(
-                        success=False,
-                        error="无法连接到 GitHub\n\n请检查：\n"
-                              "1. 网络连接是否正常\n"
-                              "2. 是否需要配置代理\n"
-                              "3. 防火墙是否阻止了 GitHub 访问\n\n"
-                              "如果需要配置代理，请在终端中执行：\n"
-                              "set HTTP_PROXY=http://proxy.example.com:port\n"
-                              "set HTTPS_PROXY=http://proxy.example.com:port"
-                    ))
-                    return
-                
-                # 使用web方式启动GitHub CLI登录
-                # gh auth login --web --hostname github.com 会打开浏览器，用户在浏览器中完成授权
-                cmd = ["gh", "auth", "login", "--web", "--hostname", "github.com", "--git-protocol", "https"]
-                
-                if status_callback:
-                    status_callback("正在启动GitHub CLI web登录...")
-                    print(f"执行命令: {' '.join(cmd)}")
-                
-                # 在新进程中启动登录命令
-                encoding = 'gbk' if sys.platform == 'win32' else 'utf-8'
-                
-                # Windows下不使用CREATE_NO_WINDOW，让浏览器能正常打开
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding=encoding,
-                    errors='ignore',
-                )
-                
-                if status_callback:
-                    status_callback(f"进程已启动 (PID: {process.pid})")
-                
-                # 检查进程是否启动成功
+                    status_callback(f"启动失败: {error_msg}")
+                on_complete(AuthResult(
+                    success=False,
+                    error=f"GitHub CLI 启动失败: {error_msg}\n\n"
+                          "可能的原因：\n"
+                          "1. 网络连接问题\n"
+                          "2. 代理配置错误\n"
+                          "3. GitHub CLI 版本过旧"
+                ))
+                return True
+
+            if status_callback:
+                status_callback("浏览器已打开，请在浏览器中完成GitHub授权...")
+                status_callback("提示：授权成功后程序会自动继续，无需手动操作")
+
+            # 实时读取输出
+            import time
+            start_time = time.time()
+            while True:
+                # 检查进程是否结束
                 if process.poll() is not None:
-                    # 进程已经结束
-                    stdout, stderr = process.communicate()
-                    error_msg = stderr.strip() if stderr else stdout.strip()
-                    if status_callback:
-                        status_callback(f"启动失败: {error_msg}")
-                    on_complete(AuthResult(
-                        success=False,
-                        error=f"GitHub CLI 启动失败: {error_msg}\n\n"
-                              "可能的原因：\n"
-                              "1. 网络连接问题\n"
-                              "2. 代理配置错误\n"
-                              "3. GitHub CLI 版本过旧"
-                    ))
-                    return
-                
-                if status_callback:
-                    status_callback("浏览器已打开，请在浏览器中完成GitHub授权...")
-                    status_callback("提示：授权成功后程序会自动继续，无需手动操作")
-                
-                # 实时读取输出
-                import time
-                start_time = time.time()
-                while True:
-                    # 检查进程是否结束
-                    if process.poll() is not None:
-                        break
-                    
-                    # 检查超时
-                    if time.time() - start_time > 300:
-                        process.terminate()
-                        break
-                    
-                    # 短暂等待
-                    time.sleep(1)
-                
-                # 获取进程输出
+                    break
+
+                # 检查超时
+                if time.time() - start_time > 300:
+                    process.terminate()
+                    # 等待进程结束，最多等待 5 秒
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # 如果进程仍然没有结束，强制杀死
+                        process.kill()
+                        process.wait()
+                    break
+
+                # 短暂等待
+                time.sleep(1)
+
+            # 获取进程输出（使用 try-except 捕获 TimeoutExpired）
+            try:
                 stdout, stderr = process.communicate(timeout=5)
-                if stderr:
-                    print(f"GitHub CLI 错误输出: {stderr}")
-                
-                # 登录完成后，重新检查状态并获取token
-                result = subprocess.run(
-                    ["gh", "auth", "status"],
-                    capture_output=True,
-                    text=True,
-                    encoding=encoding,
-                    errors='ignore',
-                    timeout=10
-                )
-                
-                if result.returncode == 0:
-                    if status_callback:
-                        status_callback("登录成功，正在获取Token...")
-                    # 调用获取token的方法
-                    self._get_gh_cli_token(on_complete, status_callback)
-                else:
-                    if status_callback:
-                        status_callback("登录未完成或已取消")
-                    on_complete(AuthResult(
-                        success=False,
-                        error="登录未完成，请重试"
-                    ))
-                    
             except subprocess.TimeoutExpired:
+                # 如果 communicate 超时，杀死进程
+                process.kill()
+                stdout, stderr = process.communicate()
+
+            if stderr:
+                print(f"GitHub CLI 错误输出: {stderr}")
+
+            # 登录完成后，重新检查状态并获取token
+            result = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True,
+                text=True,
+                encoding=encoding,
+                errors='ignore',
+                timeout=10
+            )
+
+            if result.returncode == 0:
                 if status_callback:
-                    status_callback("登录超时，请在浏览器中完成授权后重试")
+                    status_callback("登录成功，正在获取Token...")
+                # 调用获取token的方法
+                self._get_gh_cli_token(on_complete, status_callback)
+            else:
+                if status_callback:
+                    status_callback("登录未完成或已取消")
                 on_complete(AuthResult(
                     success=False,
-                    error="登录超时，请重试"
+                    error="登录未完成，请重试"
                 ))
-            except Exception as e:
-                print(f"自动登录异常: {e}")
-                if status_callback:
-                    status_callback(f"登录失败: {str(e)}")
-                on_complete(AuthResult(
-                    success=False,
-                    error=f"自动登录失败: {str(e)}"
-                ))
-        
-        # 在新线程中执行登录，避免阻塞UI
-        login_thread = threading.Thread(target=login_worker, daemon=True)
-        login_thread.start()
-        
-        return True
+
+            return True
+
+        except subprocess.TimeoutExpired:
+            if status_callback:
+                status_callback("登录超时，请在浏览器中完成授权后重试")
+            on_complete(AuthResult(
+                success=False,
+                error="登录超时，请重试"
+            ))
+            return True
+        except Exception as e:
+            print(f"自动登录异常: {e}")
+            if status_callback:
+                status_callback(f"登录失败: {str(e)}")
+            on_complete(AuthResult(
+                success=False,
+                error=f"自动登录失败: {str(e)}"
+            ))
+            return True
+        finally:
+            # 确保进程被正确清理
+            if process is not None and process.poll() is None:
+                # 如果进程仍在运行，杀死它
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                except Exception:
+                    pass
     
     def _check_github_accessibility(
         self,
@@ -295,28 +313,29 @@ class GitHubAuth:
         try:
             if status_callback:
                 status_callback("正在解析 github.com DNS...")
-            
+
             # 检查 DNS 解析
             socket.gethostbyname('github.com')
-            
+
             if status_callback:
                 status_callback("DNS 解析成功")
-            
+
             # 检查 HTTPS 连接
             if status_callback:
                 status_callback("正在连接 GitHub...")
-            
-            response = self._client.get("https://github.com", timeout=10)
-            
-            if response.status_code == 200:
-                if status_callback:
-                    status_callback("GitHub 连接正常")
-                return True
-            else:
-                if status_callback:
-                    status_callback(f"GitHub 返回错误状态码: {response.status_code}")
-                return False
-                
+
+            with self._get_client() as client:
+                response = client.get("https://github.com", timeout=10)
+
+                if response.status_code == 200:
+                    if status_callback:
+                        status_callback("GitHub 连接正常")
+                    return True
+                else:
+                    if status_callback:
+                        status_callback(f"GitHub 返回错误状态码: {response.status_code}")
+                    return False
+
         except socket.gaierror as e:
             if status_callback:
                 status_callback(f"DNS 解析失败: {e}")
@@ -423,17 +442,18 @@ class GitHubAuth:
     ) -> Optional[dict]:
         """获取GitHub用户信息"""
         try:
-            response = self._client.get(
-                "https://api.github.com/user",
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                if status_callback:
-                    status_callback(f"获取用户信息失败: HTTP {response.status_code}")
-                return None
+            with self._get_client() as client:
+                response = client.get(
+                    "https://api.github.com/user",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    if status_callback:
+                        status_callback(f"获取用户信息失败: HTTP {response.status_code}")
+                    return None
         except Exception as e:
             print(f"获取用户信息失败: {e}")
             if status_callback:
@@ -513,44 +533,46 @@ class GitHubAuth:
         credential = credential_manager.load_credential()
         if not credential:
             return []
-        
+
         try:
             headers = {
                 'Authorization': f'token {credential.access_token}',
                 'Accept': 'application/vnd.github.v3+json',
                 'User-Agent': 'GitHub-Auto-Uploader'
             }
-            
+
             repos = []
             page = 1
-            while page <= 10:
-                url = f'https://api.github.com/user/repos?per_page=100&page={page}&sort=updated&affiliation=owner,collaborator'
-                response = self._client.get(url, headers=headers)
-                
-                if response.status_code != 200:
-                    break
-                
-                data = response.json()
-                
-                if not data:
-                    break
-                
-                for repo in data:
-                    repos.append({
-                        'name': repo['name'],
-                        'full_name': repo['full_name'],
-                        'clone_url': repo['clone_url'],
-                        'default_branch': repo['default_branch'],
-                        'private': repo['private'],
-                        'updated_at': repo['updated_at']
-                    })
-                
-                if len(data) < 100:
-                    break
-                page += 1
-            
+
+            with self._get_client() as client:
+                while page <= 10:
+                    url = f'https://api.github.com/user/repos?per_page=100&page={page}&sort=updated&affiliation=owner,collaborator'
+                    response = client.get(url, headers=headers)
+
+                    if response.status_code != 200:
+                        break
+
+                    data = response.json()
+
+                    if not data:
+                        break
+
+                    for repo in data:
+                        repos.append({
+                            'name': repo['name'],
+                            'full_name': repo['full_name'],
+                            'clone_url': repo['clone_url'],
+                            'default_branch': repo['default_branch'],
+                            'private': repo['private'],
+                            'updated_at': repo['updated_at']
+                        })
+
+                    if len(data) < 100:
+                        break
+                    page += 1
+
             return repos
-            
+
         except Exception as e:
             print(f"获取仓库列表失败: {e}")
             return []
@@ -560,25 +582,26 @@ class GitHubAuth:
         credential = credential_manager.load_credential()
         if not credential:
             return []
-        
+
         try:
             headers = {
                 'Authorization': f'token {credential.access_token}',
                 'Accept': 'application/vnd.github.v3+json',
                 'User-Agent': 'GitHub-Auto-Uploader'
             }
-            
-            response = self._client.get(
-                f'https://api.github.com/repos/{owner}/{repo}/branches?per_page=100',
-                headers=headers
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return [branch['name'] for branch in data]
-            
+
+            with self._get_client() as client:
+                response = client.get(
+                    f'https://api.github.com/repos/{owner}/{repo}/branches?per_page=100',
+                    headers=headers
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    return [branch['name'] for branch in data]
+
             return []
-            
+
         except Exception:
             return []
     
